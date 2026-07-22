@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-# Online-Voting-System
-This project implements a Decentralized Voting System using blockchain and multimodal biometric authentication. Voters are verified using face recognition, palm recognition, and OTP. Votes are securely encrypted and stored on the blockchain, preventing tampering and double voting while ensuring transparency and trust.
-=======
-
 # SecureVote Chain - Decentralized Voting System with Multimodel Biometric Verification
 
 A complete decentralized voting system that combines blockchain technology with facial recognition, palm verification, and OTP for secure and transparent elections.
@@ -148,6 +143,16 @@ npm install
 npm run dev
 ```
 
+## Database Migrations
+
+Apply schema changes with Supabase CLI:
+
+```bash
+npx supabase db push
+```
+
+Migrations live in `supabase/migrations/`.
+
 ## Future Enhancements
 
 - Mobile application integration
@@ -161,4 +166,3 @@ npm run dev
 ## Contact
 
 For more information about this project, please contact the project team.
->>>>>>> d78c778 (Initial commit)
