@@ -3,11 +3,10 @@ import Layout from '@/components/Layout';
 import AdminDashboard from '@/components/admin/AdminDashboard';
 import { useAuth } from '@/hooks/useAuth';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Shield, AlertCircle, Loader2, Lock, UserPlus, Calendar, Check, Users, Vote } from 'lucide-react';
+import { Loader2, Users, Vote, Copy, Megaphone, Calendar, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
-import FaceRecognition from '@/components/FaceRecognition';
 import { Input } from '@/components/ui/input';
 import { toast } from '@/hooks/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -23,6 +22,10 @@ interface Election {
   start_date: string;
   end_date: string;
   is_active: boolean;
+  access_code?: string | null;
+  results_access_offset_minutes?: number;
+  results_published?: boolean;
+  results_published_at?: string | null;
 }
 
 interface Candidate {
@@ -37,10 +40,6 @@ const Admin = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
-  const [isVerifying, setIsVerifying] = useState<boolean>(false);
-  const [isBiometricsVerified, setIsBiometricsVerified] = useState<boolean>(false);
-  const [adminPassword, setAdminPassword] = useState<string>("");
   const [activeTab, setActiveTab] = useState<string>("create");
   const [elections, setElections] = useState<Election[]>([]);
   const [selectedElection, setSelectedElection] = useState<Election | null>(null);
@@ -63,34 +62,16 @@ const Admin = () => {
   const [candidateParty, setCandidateParty] = useState<string>("");
   const [candidateBio, setCandidateBio] = useState<string>("");
 
-  // Check if user is an admin
+  // Fetch elections after auth login (ProtectedRoute already requires a session)
   useEffect(() => {
-    const checkAdminStatus = async () => {
-      if (!user) return;
-      
-      try {
-        // Check if email ends with admin.com or is in the admin list
-        const isUserAdmin = user.email?.endsWith('@chiraj.com') || false;
-        setIsAdmin(isUserAdmin);
-      } catch (error) {
-        console.error("Error checking admin status:", error);
-        setIsAdmin(false);
-      }
-    };
-
-    checkAdminStatus();
-  }, [user]);
-
-  // Fetch elections
-  useEffect(() => {
-    if (isBiometricsVerified) {
+    if (user) {
       fetchElections();
     }
-  }, [isBiometricsVerified]);
+  }, [user]);
 
   // Handle navigation state from AdminDashboard (for editing election)
   useEffect(() => {
-    if (location.state && (location.state as any).electionId && isBiometricsVerified && elections.length > 0) {
+    if (location.state && (location.state as any).electionId && elections.length > 0) {
       const electionId = (location.state as any).electionId;
       const tab = (location.state as any).tab || 'edit';
       
@@ -102,7 +83,7 @@ const Admin = () => {
         navigate(location.pathname, { replace: true, state: {} });
       }
     }
-  }, [location.state, isBiometricsVerified, elections, navigate]);
+  }, [location.state, elections, navigate]);
 
   // Fetch candidates when an election is selected
   useEffect(() => {
@@ -188,6 +169,56 @@ const Admin = () => {
       
       setIsActive(election.is_active);
       setActiveTab("edit");
+
+      if (!election.access_code) {
+        void generateAccessCodeFor(election);
+      }
+    }
+  };
+
+  const generateAccessCodeFor = async (election: Election) => {
+    try {
+      const { data, error } = await supabase.rpc("ensure_election_access_code", {
+        p_election_id: election.id,
+      });
+
+      let code: string;
+      if (error) {
+        const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        code = "";
+        for (let i = 0; i < 8; i++) {
+          code += alphabet[Math.floor(Math.random() * alphabet.length)];
+        }
+        const { error: updateError } = await supabase
+          .from("elections")
+          .update({ access_code: code })
+          .eq("id", election.id);
+        if (updateError) throw updateError;
+      } else {
+        code = String(data);
+      }
+
+      const updated = { ...election, access_code: code };
+      setSelectedElection((current) =>
+        current?.id === election.id ? { ...current, access_code: code } : current
+      );
+      setElections((prev) => prev.map((e) => (e.id === election.id ? { ...e, access_code: code } : e)));
+      toast({
+        title: "Access code ready",
+        description: `Share this code with voters: ${code}`,
+      });
+      return updated;
+    } catch (err) {
+      console.error("Error generating access code:", err);
+      toast({
+        title: "Could not create access code",
+        description:
+          err instanceof Error
+            ? err.message
+            : "Run APPLY_BACKFILL_ACCESS_CODES.sql in Supabase, then try again.",
+        variant: "destructive",
+      });
+      return null;
     }
   };
 
@@ -227,9 +258,14 @@ const Admin = () => {
         
       if (error) throw error;
       
+      const created = data?.[0] as Election | undefined;
+      const code = created?.access_code;
+
       toast({
-        title: "Election Created",
-        description: "The election has been successfully created.",
+        title: "Election created",
+        description: code
+          ? `Share access code ${code} with voters. They join at the home page — no login.`
+          : "Election created. Share the access code shown on the Candidates tab.",
       });
       
       // Reset form fields
@@ -246,8 +282,8 @@ const Admin = () => {
       fetchElections();
       
       // If the created election has data, select it for adding candidates
-      if (data && data.length > 0) {
-        setSelectedElection(data[0]);
+      if (created) {
+        setSelectedElection(created);
         setActiveTab("candidates");
       }
       
@@ -259,6 +295,52 @@ const Admin = () => {
         variant: "destructive",
       });
     }
+  };
+
+  const handleTogglePublishResults = async () => {
+    if (!selectedElection) return;
+
+    const next = !selectedElection.results_published;
+    try {
+      const { data, error } = await supabase.rpc('set_election_results_published', {
+        p_election_id: selectedElection.id,
+        p_published: next,
+      });
+
+      if (error) throw error;
+
+      const updated = {
+        ...selectedElection,
+        results_published: next,
+        results_published_at: next ? new Date().toISOString() : null,
+      };
+      setSelectedElection(updated);
+      setElections((prev) =>
+        prev.map((e) => (e.id === updated.id ? { ...e, ...updated } : e))
+      );
+
+      toast({
+        title: next ? "Results published" : "Results unpublished",
+        description: next
+          ? "Voters can now see this election on the Results page."
+          : "Results are hidden from the public Results page.",
+      });
+
+      // keep TS happy if RPC returns payload
+      void data;
+    } catch (err) {
+      console.error("Error publishing results:", err);
+      toast({
+        title: "Could not update results visibility",
+        description: err instanceof Error ? err.message : "Try running the results_published migration.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleGenerateAccessCode = async () => {
+    if (!selectedElection) return;
+    await generateAccessCodeFor(selectedElection);
   };
 
   const handleUpdateElection = async () => {
@@ -330,7 +412,8 @@ const Admin = () => {
         .insert([{
           name: candidateName,
           party: candidateParty,
-          bio: candidateBio,
+          bio: candidateBio || "",
+          photo_url: "",
           election_id: selectedElection.id
         }]);
         
@@ -389,97 +472,9 @@ const Admin = () => {
     }
   };
 
-  const handleFaceVerificationSuccess = () => {
-    setIsBiometricsVerified(true);
-  };
-
-  const handleAdminPasswordLogin = () => {
-    // In a real application, this would be a more secure comparison
-    // For demo purposes, we're using a simple password check
-    if (adminPassword === "Chiraj@123") {
-      setIsAdmin(true);
-      toast({
-        title: "Admin Access Granted",
-        description: "You have successfully logged in as an administrator.",
-      });
-    } else {
-      toast({
-        title: "Access Denied",
-        description: "Incorrect admin password.",
-        variant: "destructive",
-      });
-    }
-  };
-
-  if (isAdmin === null) {
-    return (
-      <Layout>
-        <div className="container mx-auto py-8 flex justify-center items-center min-h-[60vh]">
-          <Loader2 className="h-12 w-12 animate-spin text-primary" />
-        </div>
-      </Layout>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <Layout>
-        <div className="container mx-auto py-8">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <Shield className="h-6 w-6 text-primary" />
-                <CardTitle>Admin Authentication</CardTitle>
-              </div>
-              <CardDescription>
-                Please enter the admin password to access the admin dashboard.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center gap-2">
-                <Lock className="h-4 w-4 text-muted-foreground" />
-                <Input 
-                  type="password" 
-                  placeholder="Enter admin password" 
-                  value={adminPassword}
-                  onChange={(e) => setAdminPassword(e.target.value)}
-                />
-              </div>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <Button onClick={handleAdminPasswordLogin} className="flex-1">
-                  Login as Admin
-                </Button>
-                <Button onClick={() => navigate('/')} variant="outline" className="flex-1">
-                  Return to Home
-                </Button>
-              </div>
-             
-            </CardContent>
-          </Card>
-        </div>
-      </Layout>
-    );
-  }
-
   return (
     <Layout>
       <div className="container mx-auto py-8">
-        {!isBiometricsVerified ? (
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <Shield className="h-6 w-6 text-primary" />
-                <CardTitle>Admin Authentication Required</CardTitle>
-              </div>
-              <CardDescription>
-                Please complete biometric verification to access the admin dashboard.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <FaceRecognition onVerified={handleFaceVerificationSuccess} />
-            </CardContent>
-          </Card>
-        ) : (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <h1 className="text-3xl font-bold">Election Management System</h1>
@@ -646,7 +641,7 @@ const Admin = () => {
                         <div>
                           <Label htmlFor="selectElection">Select Election</Label>
                           <Select 
-                            value={selectedElection?.id || ""} 
+                            value={selectedElection?.id ?? undefined} 
                             onValueChange={handleElectionSelect}
                           >
                             <SelectTrigger>
@@ -656,11 +651,58 @@ const Admin = () => {
                               {elections.map(election => (
                                 <SelectItem key={election.id} value={election.id}>
                                   {election.title}
+                                  {election.access_code ? ` (${election.access_code})` : ""}
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
                         </div>
+
+                        {selectedElection && (
+                          <div className="rounded-lg border bg-muted/40 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium">Voter access code</p>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Share this code on the join page. Voters do not log in.
+                              </p>
+                              {selectedElection.access_code ? (
+                                <p className="font-mono text-2xl tracking-[0.25em] mt-2 font-semibold">
+                                  {selectedElection.access_code}
+                                </p>
+                              ) : (
+                                <p className="text-sm text-amber-700 mt-2">
+                                  No code yet. Click generate, or run APPLY_BACKFILL_ACCESS_CODES.sql.
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex gap-2">
+                              {selectedElection.access_code ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  onClick={async () => {
+                                    try {
+                                      await navigator.clipboard.writeText(selectedElection.access_code || "");
+                                      toast({ title: "Copied", description: "Access code copied to clipboard." });
+                                    } catch {
+                                      toast({
+                                        title: "Copy failed",
+                                        description: selectedElection.access_code || "",
+                                      });
+                                    }
+                                  }}
+                                >
+                                  <Copy className="h-4 w-4 mr-2" />
+                                  Copy code
+                                </Button>
+                              ) : (
+                                <Button type="button" onClick={handleGenerateAccessCode}>
+                                  Generate access code
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        )}
                         
                         {selectedElection && (
                           <div className="space-y-4">
@@ -821,7 +863,7 @@ const Admin = () => {
                     <div>
                       <Label htmlFor="candidateElection">Select Election</Label>
                       <Select 
-                        value={selectedElection?.id || ""} 
+                        value={selectedElection?.id ?? undefined} 
                         onValueChange={handleElectionSelect}
                       >
                         <SelectTrigger>
@@ -831,11 +873,81 @@ const Admin = () => {
                           {elections.map(election => (
                             <SelectItem key={election.id} value={election.id}>
                               {election.title}
+                              {election.access_code ? ` (${election.access_code})` : ""}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     </div>
+
+                    {selectedElection && (
+                      <div className="rounded-lg border bg-muted/40 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium">Voter access code</p>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Share this code. Voters join on the home page — no login or registration.
+                          </p>
+                          {selectedElection.access_code ? (
+                            <p className="font-mono text-2xl tracking-[0.25em] mt-2 font-semibold">
+                              {selectedElection.access_code}
+                            </p>
+                          ) : (
+                            <p className="text-sm text-amber-700 mt-2">
+                              No code yet for this election. Generate one to let voters join.
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          {selectedElection.access_code ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(selectedElection.access_code || "");
+                                  toast({ title: "Copied", description: "Access code copied to clipboard." });
+                                } catch {
+                                  toast({
+                                    title: "Copy failed",
+                                    description: selectedElection.access_code || "",
+                                  });
+                                }
+                              }}
+                            >
+                              <Copy className="h-4 w-4 mr-2" />
+                              Copy code
+                            </Button>
+                          ) : (
+                            <Button type="button" onClick={handleGenerateAccessCode}>
+                              Generate access code
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedElection && (
+                      <div className="rounded-lg border p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium flex items-center gap-2">
+                            <Megaphone className="h-4 w-4" />
+                            Public results
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            {selectedElection.results_published
+                              ? "Results are live on the Results page."
+                              : "Results stay hidden until you publish them."}
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant={selectedElection.results_published ? "outline" : "default"}
+                          onClick={handleTogglePublishResults}
+                        >
+                          {selectedElection.results_published ? "Unpublish results" : "Publish results"}
+                        </Button>
+                      </div>
+                    )}
                     
                     {selectedElection && (
                       <div className="space-y-6">
@@ -934,7 +1046,6 @@ const Admin = () => {
             
             <AdminDashboard />
           </div>
-        )}
       </div>
     </Layout>
   );

@@ -1,7 +1,6 @@
-
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Shield, Vote, BarChart, Users, Settings, LogOut, FileText } from 'lucide-react';
+import { Shield, KeyRound, BarChart, Settings, LogOut, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -12,17 +11,13 @@ interface LayoutProps {
 const Layout: React.FC<LayoutProps> = ({ children }) => {
   const location = useLocation();
   const { signOut, user } = useAuth();
-  
-  // Updated navigation items with correct order based on user flow
+
   const navItems = [
-    { name: 'Home', path: '/home', icon: Shield },
-    { name: 'Registration', path: '/registration', icon: FileText },
-    { name: 'Vote', path: '/vote', icon: Vote },
+    { name: 'Join', path: '/', icon: KeyRound },
     { name: 'Results', path: '/results', icon: BarChart },
-    { name: 'Profile', path: '/profile', icon: Users },
+    { name: 'About', path: '/home', icon: Info },
   ];
 
-  // Only show admin for certain users (in a real app, this would check roles)
   if (user) {
     navItems.push({ name: 'Admin', path: '/admin', icon: Settings });
   }
@@ -35,11 +30,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     <div className="min-h-screen flex flex-col">
       <header className="border-b bg-white shadow-sm">
         <div className="container mx-auto px-4 py-3 flex justify-between items-center">
-          <div className="flex items-center space-x-2">
+          <Link to="/" className="flex items-center space-x-2">
             <Shield className="h-6 w-6 text-primary" />
             <span className="text-xl font-bold">SecureVote Chain</span>
-          </div>
-          <nav className="hidden md:flex space-x-6">
+          </Link>
+          <nav className="hidden md:flex space-x-6 items-center">
             {navItems.map((item) => (
               <Link
                 key={item.name}
@@ -53,7 +48,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 <span>{item.name}</span>
               </Link>
             ))}
-            {user && (
+            {user ? (
               <button
                 onClick={handleSignOut}
                 className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-slate-100 transition-colors"
@@ -61,26 +56,26 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 <LogOut className="h-4 w-4" />
                 <span>Sign Out</span>
               </button>
-            )}
+            ) : null}
           </nav>
         </div>
       </header>
-      
-      <main className="flex-1 container mx-auto px-4 py-6">
+
+      <main className="flex-1 container mx-auto px-4 py-6 pb-24 md:pb-6">
         {children}
       </main>
-      
+
       <footer className="border-t bg-white py-6">
         <div className="container mx-auto px-4 text-center text-sm text-gray-500">
-          <p>© 2025 SecureVote Chain - Decentralized Voting System with Multi-Model Biometric Verification</p>
+          <p>© {new Date().getFullYear()} SecureVote Chain — join with election access code</p>
         </div>
       </footer>
-      
+
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">
-        <div className="grid grid-cols-5">
-          {navItems.slice(0, 5).map((item) => (
+        <div className={cn("grid", navItems.length >= 4 ? "grid-cols-4" : "grid-cols-3")}>
+          {navItems.map((item) => (
             <Link
-              key={item.name}
+              key={item.name + item.path}
               to={item.path}
               className={cn(
                 "flex flex-col items-center py-2 px-1",

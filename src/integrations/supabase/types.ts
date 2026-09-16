@@ -57,6 +57,10 @@ export type Database = {
           is_active: boolean
           start_date: string
           title: string
+          access_code: string | null
+          results_access_offset_minutes: number | null
+          results_published: boolean
+          results_published_at: string | null
         }
         Insert: {
           created_at?: string
@@ -67,6 +71,10 @@ export type Database = {
           is_active?: boolean
           start_date: string
           title: string
+          access_code?: string | null
+          results_access_offset_minutes?: number | null
+          results_published?: boolean
+          results_published_at?: string | null
         }
         Update: {
           created_at?: string
@@ -77,6 +85,10 @@ export type Database = {
           is_active?: boolean
           start_date?: string
           title?: string
+          access_code?: string | null
+          results_access_offset_minutes?: number | null
+          results_published?: boolean
+          results_published_at?: string | null
         }
         Relationships: [
           {
@@ -282,7 +294,43 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      join_election_with_code: {
+        Args: { p_code: string }
+        Returns: Json
+      }
+      complete_session_biometrics: {
+        Args: {
+          p_token: string
+          p_face_verified?: boolean | null
+          p_palm_verified?: boolean | null
+          p_face_image_url?: string | null
+        }
+        Returns: Json
+      }
+      get_session_ballot: {
+        Args: { p_token: string }
+        Returns: Json
+      }
+      cast_vote_with_session: {
+        Args: { p_token: string; p_candidate_id: string }
+        Returns: Json
+      }
+      generate_election_access_code: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      get_published_election_results: {
+        Args: Record<PropertyKey, never>
+        Returns: Json
+      }
+      set_election_results_published: {
+        Args: { p_election_id: string; p_published: boolean }
+        Returns: Json
+      }
+      ensure_election_access_code: {
+        Args: { p_election_id: string }
+        Returns: string
+      }
     }
     Enums: {
       [_ in never]: never

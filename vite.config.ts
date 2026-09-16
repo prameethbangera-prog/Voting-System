@@ -30,6 +30,7 @@ export default defineConfig(({ mode }) => ({
       'react-dom/client'
     ],
     exclude: [
+      '@mediapipe/tasks-vision',
       '@radix-ui/react-tooltip',
       '@radix-ui/react-tabs',
       '@radix-ui/react-select',

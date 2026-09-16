@@ -1,7 +1,23 @@
-import { useState, useEffect, useRef } from 'react';
-import { toast } from '@/hooks/use-toast';
-import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/integrations/supabase/client';
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
+import {
+  cosineSimilarity,
+  detectFaceOnDataUrl,
+  detectFaceOnVideo,
+  getFaceLandmarker,
+  type FaceDetectionFrame,
+} from "@/utils/face/mediapipeFace";
+import {
+  LivenessTracker,
+  gestureInstruction,
+  pickLivenessGestures,
+  type LivenessGesture,
+} from "@/utils/face/liveness";
+
+const DESCRIPTOR_KEY = "securevote_face_descriptor";
+const MATCH_THRESHOLD = 0.88;
 
 interface UseFaceVerificationProps {
   onVerified?: () => void;
@@ -9,517 +25,367 @@ interface UseFaceVerificationProps {
   isRegistrationMode?: boolean;
 }
 
-export function useFaceVerification({ onVerified, onError, isRegistrationMode = false }: UseFaceVerificationProps) {
+function loadLocalDescriptor(): number[] | null {
+  try {
+    const raw = sessionStorage.getItem(DESCRIPTOR_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalDescriptor(descriptor: number[]) {
+  sessionStorage.setItem(DESCRIPTOR_KEY, JSON.stringify(descriptor));
+}
+
+export function useFaceVerification({
+  onVerified,
+  onError,
+  isRegistrationMode = false,
+}: UseFaceVerificationProps) {
   const [isCaptured, setIsCaptured] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationStatus, setVerificationStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  const [hasReferenceImage, setHasReferenceImage] = useState<boolean>(false);
+  const [verificationStatus, setVerificationStatus] = useState<"idle" | "success" | "error">("idle");
+  const [hasReferenceImage, setHasReferenceImage] = useState(false);
   const [isLivenessChecking, setIsLivenessChecking] = useState(false);
-  const [livenessGestures, setLivenessGestures] = useState<string[]>([]);
-  const [currentGesture, setCurrentGesture] = useState<string | null>(null);
+  const [currentGesture, setCurrentGesture] = useState<LivenessGesture | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
-  const [failedAttempts, setFailedAttempts] = useState(0);
   const [isLocked, setIsLocked] = useState(false);
   const [lockoutEndTime, setLockoutEndTime] = useState<Date | null>(null);
-  const { user } = useAuth();
-  const captureAttempts = useRef(0);
-  const livenessPassedRef = useRef(false);
-  const consecutiveFailedVerifications = useRef(0);
+  const [modelReady, setModelReady] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [liveFrame, setLiveFrame] = useState<FaceDetectionFrame | null>(null);
 
-  // Fetch the user's registered face image when component mounts
+  const { user } = useAuth();
+  const referenceDescriptor = useRef<number[] | null>(loadLocalDescriptor());
+  const livenessQueue = useRef<LivenessGesture[]>([]);
+  const livenessTracker = useRef(new LivenessTracker());
+  const consecutiveFailedVerifications = useRef(0);
+  const lastDetectTs = useRef(0);
+  const detecting = useRef(false);
+  const livenessBusy = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getFaceLandmarker()
+      .then(() => {
+        if (!cancelled) setModelReady(true);
+      })
+      .catch((err) => {
+        console.error("Face model load failed:", err);
+        if (!cancelled) {
+          setModelError("Could not load the face detection model. Check your internet connection.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (referenceDescriptor.current?.length) {
+      setHasReferenceImage(true);
+    }
+  }, []);
+
   useEffect(() => {
     const fetchUserFace = async () => {
-      if (!user?.id) return;
-      
+      if (!user?.id || isRegistrationMode) return;
+
       try {
-        console.log("Fetching user biometrics for user ID:", user.id);
         const { data, error } = await supabase
-          .from('user_biometrics')
-          .select('face_image_url')
-          .eq('user_id', user.id)
+          .from("user_biometrics")
+          .select("face_image_url")
+          .eq("user_id", user.id)
           .maybeSingle();
-        
-        if (error) {
-          console.error('Error fetching user face image:', error);
-          toast({
-            title: "Error",
-            description: "Failed to fetch your registered face image. Please try again later.",
-            variant: "destructive",
-          });
-          return;
-        }
-        
-        console.log("User biometrics data:", data);
-        
-        if (data?.face_image_url) {
-          setReferenceImage(data.face_image_url);
+
+        if (error || !data?.face_image_url) return;
+
+        const frame = await detectFaceOnDataUrl(data.face_image_url);
+        if (frame.descriptor.length) {
+          referenceDescriptor.current = frame.descriptor;
+          saveLocalDescriptor(frame.descriptor);
           setHasReferenceImage(true);
-          toast({
-            title: "Biometrics Found",
-            description: "Your facial biometric data was successfully retrieved.",
-          });
-        } else {
-          console.log("No face image found for user");
-          setHasReferenceImage(false);
-          toast({
-            title: "No Biometrics Found",
-            description: "Please register your facial biometrics to continue.",
-          });
         }
       } catch (err) {
-        console.error('Error in fetchUserFace:', err);
-        toast({
-          title: "Error",
-          description: "An unexpected error occurred. Please try again later.",
-          variant: "destructive",
-        });
+        console.error("Error loading registered face:", err);
       }
     };
-    
+
     fetchUserFace();
-  }, [user]);
+  }, [user, isRegistrationMode]);
 
-  // Initialize liveness detection gestures - requiring more gestures for better security
   useEffect(() => {
-    if (isLivenessChecking && livenessGestures.length === 0) {
-      // Enhanced random selection of gestures for liveness check - requiring 4 gestures for better security
-      const availableGestures = ['blink', 'smile', 'turn_left', 'turn_right', 'nod', 'raise_eyebrows'];
-      const selectedGestures = [];
-      
-      // Randomly select 4 gestures (increased from 3)
-      while (selectedGestures.length < 4) {
-        const randomIndex = Math.floor(Math.random() * availableGestures.length);
-        const gesture = availableGestures[randomIndex];
-        if (!selectedGestures.includes(gesture)) {
-          selectedGestures.push(gesture);
-        }
+    if (!isLocked || !lockoutEndTime) return;
+    const timer = setInterval(() => {
+      if (new Date() >= lockoutEndTime) {
+        setIsLocked(false);
+        setLockoutEndTime(null);
+        consecutiveFailedVerifications.current = 0;
       }
-      
-      setLivenessGestures(selectedGestures);
-      setCurrentGesture(selectedGestures[0]);
-    }
-  }, [isLivenessChecking]);
-
-  // Check for lockout status
-  useEffect(() => {
-    if (isLocked && lockoutEndTime) {
-      const checkLockStatus = () => {
-        if (new Date() >= lockoutEndTime) {
-          setIsLocked(false);
-          setLockoutEndTime(null);
-          consecutiveFailedVerifications.current = 0;
-        }
-      };
-
-      const timer = setInterval(checkLockStatus, 1000);
-      return () => clearInterval(timer);
-    }
+    }, 1000);
+    return () => clearInterval(timer);
   }, [isLocked, lockoutEndTime]);
 
-  // Register a new face image
-  const registerFace = async (videoRef: React.RefObject<HTMLVideoElement>, canvasRef: React.RefObject<HTMLCanvasElement>) => {
-    if (!user?.id || !videoRef.current || !canvasRef.current) {
-      toast({
-        title: "Error",
-        description: "Camera elements not available or user not logged in.",
-        variant: "destructive",
-      });
-      return;
+  const detectFromVideo = useCallback(async (video: HTMLVideoElement | null) => {
+    if (!video || !modelReady || video.readyState < 2 || detecting.current) return;
+    detecting.current = true;
+    try {
+      const now = performance.now();
+      if (now - lastDetectTs.current < 66) return;
+      lastDetectTs.current = now;
+      const frame = await detectFaceOnVideo(video, now);
+      setLiveFrame(frame);
+      return frame;
+    } catch (err) {
+      console.error("Face detect error:", err);
+      return null;
+    } finally {
+      detecting.current = false;
+    }
+  }, [modelReady]);
+
+  const lockTemporarily = () => {
+    const lockoutEnd = new Date();
+    lockoutEnd.setMinutes(lockoutEnd.getMinutes() + 5);
+    setIsLocked(true);
+    setLockoutEndTime(lockoutEnd);
+    toast({
+      title: "Temporarily locked",
+      description: "Too many failed face checks. Try again in 5 minutes.",
+      variant: "destructive",
+    });
+  };
+
+  const compareToReference = async (
+    video: HTMLVideoElement
+  ): Promise<{ verified: boolean; confidence: number }> => {
+    const live = await detectFaceOnVideo(video, performance.now());
+    if (!live.detected || !live.descriptor.length) {
+      return { verified: false, confidence: 0 };
     }
 
-    setIsRegistering(true);
+    let reference = referenceDescriptor.current;
+    if (!reference?.length) {
+      reference = loadLocalDescriptor();
+    }
+    if (!reference?.length) {
+      return { verified: false, confidence: 0 };
+    }
 
+    const score = cosineSimilarity(live.descriptor, reference);
+    return { verified: score >= MATCH_THRESHOLD, confidence: score };
+  };
+
+  const finishSuccess = (confidence?: number) => {
+    setVerificationStatus("success");
+    consecutiveFailedVerifications.current = 0;
+    toast({
+      title: "Face verified",
+      description:
+        confidence != null
+          ? `Match score ${Math.round(confidence * 100)}%.`
+          : "Your face was detected and liveness passed.",
+    });
+    if (onVerified) {
+      setTimeout(() => onVerified(), 600);
+    }
+  };
+
+  const registerFromVideo = async (video: HTMLVideoElement, canvas: HTMLCanvasElement) => {
+    setIsRegistering(true);
     try {
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
-      
-      if (!context) {
-        throw new Error("Could not initialize camera context");
+      const frame = await detectFaceOnVideo(video, performance.now());
+      if (!frame.detected || !frame.closeEnough || !frame.descriptor.length) {
+        throw new Error("No clear face found. Face the camera and try again.");
       }
-      
-      // Set canvas dimensions to match video
-      canvas.width = videoRef.current.videoWidth || 640;
-      canvas.height = videoRef.current.videoHeight || 480;
-      
-      // Draw the current video frame on the canvas
-      context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      
-      // Convert canvas to base64 image data
-      const imageData = canvas.toDataURL('image/jpeg', 0.9);
-      
-      console.log("Registering face image for user:", user.id);
-      
-      // Check if user already has a face image
-      const { data: existingData } = await supabase
-        .from('user_biometrics')
-        .select('id')
-        .eq('user_id', user.id)
-        .maybeSingle();
-        
-      let result;
-      
-      if (existingData) {
-        // Update existing record
-        console.log("Updating existing biometrics record");
-        result = await supabase
-          .from('user_biometrics')
-          .update({
-            face_image_url: imageData,
-            updated_at: new Date().toISOString()
-          })
-          .eq('user_id', user.id);
-      } else {
-        // Insert new record
-        console.log("Creating new biometrics record");
-        result = await supabase
-          .from('user_biometrics')
-          .insert({
-            user_id: user.id,
-            face_image_url: imageData
-          });
-      }
-      
-      if (result.error) {
-        throw result.error;
-      }
-      
-      toast({
-        title: "Face Registered",
-        description: "Your face has been successfully registered for secure voting.",
-      });
-      
-      // Set the reference image to the newly captured image
-      setReferenceImage(imageData);
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Could not capture camera frame.");
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = canvas.toDataURL("image/jpeg", 0.85);
+
+      referenceDescriptor.current = frame.descriptor;
+      saveLocalDescriptor(frame.descriptor);
       setHasReferenceImage(true);
-      
-      // If we're in registration mode and onVerified callback exists, call it
-      if (isRegistrationMode && onVerified) {
-        onVerified();
+
+      if (user?.id) {
+        const { data: existingData } = await supabase
+          .from("user_biometrics")
+          .select("id")
+          .eq("user_id", user.id)
+          .maybeSingle();
+
+        const result = existingData
+          ? await supabase
+              .from("user_biometrics")
+              .update({ face_image_url: imageData, updated_at: new Date().toISOString() })
+              .eq("user_id", user.id)
+          : await supabase.from("user_biometrics").insert({
+              user_id: user.id,
+              face_image_url: imageData,
+            });
+
+        if (result.error) {
+          console.warn("Could not save face to database:", result.error);
+        }
       }
-      
+
+      setIsCaptured(true);
+      finishSuccess();
     } catch (error) {
-      console.error('Face registration error:', error);
       toast({
-        title: "Registration Error",
-        description: "Failed to save your face image. Please try again.",
+        title: "Registration failed",
+        description: error instanceof Error ? error.message : "Try again.",
         variant: "destructive",
       });
-      
-      if (onError) {
-        onError();
-      }
+      if (onError) onError();
     } finally {
       setIsRegistering(false);
     }
   };
 
-  // Capture image from webcam and start verification process
-  const captureImage = (videoRef: React.RefObject<HTMLVideoElement>, canvasRef: React.RefObject<HTMLCanvasElement>) => {
-    if (!videoRef.current || !canvasRef.current) {
-      toast({
-        title: "Error",
-        description: "Camera elements not available. Please refresh the page.",
-        variant: "destructive",
-      });
-      
-      if (onError) onError();
-      return;
-    }
-    
-    // Check if user is locked out
-    if (isLocked) {
-      const remainingTime = lockoutEndTime ? Math.ceil((lockoutEndTime.getTime() - new Date().getTime()) / 1000 / 60) : 0;
-      toast({
-        title: "Security Lockout",
-        description: `Too many failed verification attempts. Please try again in ${remainingTime} minutes.`,
-        variant: "destructive",
-      });
-      
-      if (onError) onError();
-      return;
-    }
-    
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    
-    if (!context) {
-      toast({
-        title: "Error",
-        description: "Could not initialize camera context. Please try again.",
-        variant: "destructive",
-      });
-      
-      if (onError) onError();
-      return;
-    }
-    
-    // Set canvas dimensions to match video
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    
-    // Draw the current video frame on the canvas
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    setIsCaptured(true);
-    
-    if (!isRegistrationMode && !hasReferenceImage) {
-      toast({
-        title: "Face Not Registered",
-        description: "Please register your face first before attempting verification.",
-        variant: "destructive",
-      });
-      setVerificationStatus('error');
-      setTimeout(() => {
-        setIsCaptured(false);
-        setVerificationStatus('idle');
-      }, 2000);
-      
-      if (onError) onError();
-      return;
-    }
-    
-    // If we're in registration mode, register the face instead of verifying
-    if (isRegistrationMode) {
-      registerFace(videoRef, canvasRef);
-      return;
-    }
-    
-    // Start enhanced liveness detection before verification
-    setIsLivenessChecking(true);
-    toast({
-      title: "Enhanced Security Check",
-      description: `Please ${formatGestureInstruction(currentGesture || '')} to verify you're a real person.`,
-    });
-  };
-
-  // Format gesture instruction for user display
-  const formatGestureInstruction = (gesture: string): string => {
-    switch(gesture) {
-      case 'blink': return 'blink your eyes';
-      case 'smile': return 'smile at the camera';
-      case 'turn_left': return 'turn your head slightly to the left';
-      case 'turn_right': return 'turn your head slightly to the right';
-      case 'nod': return 'nod your head up and down';
-      case 'raise_eyebrows': return 'raise your eyebrows';
-      default: return 'follow the instructions';
-    }
-  };
-
-  // Process liveness detection gesture with enhanced security
-  const processLivenessGesture = (successful: boolean = true) => {
-    if (!successful) {
-      toast({
-        title: "Security Check Failed",
-        description: "Please try the gesture again or restart verification.",
-        variant: "destructive",
-      });
-      captureAttempts.current += 1;
-      
-      // After 3 failed attempts, reset the process and increment security counter
-      if (captureAttempts.current >= 3) {
-        consecutiveFailedVerifications.current += 1;
-        
-        // If too many consecutive failures, lock the account temporarily
-        if (consecutiveFailedVerifications.current >= 3) {
-          // Lock for 15 minutes
-          const lockoutEnd = new Date();
-          lockoutEnd.setMinutes(lockoutEnd.getMinutes() + 15);
-          setIsLocked(true);
-          setLockoutEndTime(lockoutEnd);
-          
-          toast({
-            title: "Account Temporarily Locked",
-            description: "Too many failed verification attempts. For security reasons, biometric verification has been locked for 15 minutes.",
-            variant: "destructive",
-          });
-          
-          if (onError) onError();
-        }
-        
-        resetVerification();
-      }
-      return;
-    }
-    
-    // Find current gesture index
-    const currentIndex = livenessGestures.findIndex(gesture => gesture === currentGesture);
-    
-    // If all gestures are completed
-    if (currentIndex === livenessGestures.length - 1) {
-      livenessPassedRef.current = true;
-      setIsLivenessChecking(false);
-      
-      toast({
-        title: "Security Check Passed",
-        description: "Proceeding with face verification.",
-      });
-      
-      // Proceed to verification
-      verifyFace();
-    } else {
-      // Move to next gesture
-      setCurrentGesture(livenessGestures[currentIndex + 1]);
-      toast({
-        title: "Good!",
-        description: `Now please ${formatGestureInstruction(livenessGestures[currentIndex + 1])}`,
-      });
-    }
-  };
-
-  // Verify facial image against the user's registered face with enhanced security
-  const verifyFace = async () => {
-    // Skip verification if we don't have a reference image
-    if (!referenceImage) {
-      toast({
-        title: "Face Not Registered",
-        description: "Please register your face first before attempting to vote.",
-        variant: "destructive",
-      });
-      setVerificationStatus('error');
-      setTimeout(() => {
-        setIsCaptured(false);
-        setIsVerifying(false);
-        setVerificationStatus('idle');
-      }, 2000);
-      
-      if (onError) onError();
-      return;
-    }
-
+  const verifyAgainstReference = async (video: HTMLVideoElement) => {
     setIsVerifying(true);
-    
     try {
-      // In a real implementation, this would call a backend API for face comparison
-      const result = await simulateFaceComparison(referenceImage);
-      
+      const result = await compareToReference(video);
       if (result.verified) {
-        setVerificationStatus('success');
-        toast({
-          title: "Face Verified",
-          description: `Your identity has been successfully verified with ${Math.round(result.confidence * 100)}% confidence.`,
-        });
-        
-        // Reset the consecutive failures counter on success
-        consecutiveFailedVerifications.current = 0;
-        
-        // Call the onVerified callback after a short delay
-        if (onVerified) {
-          setTimeout(() => {
-            onVerified();
-          }, 1500);
-        }
+        setIsCaptured(true);
+        finishSuccess(result.confidence);
       } else {
-        setVerificationStatus('error');
+        consecutiveFailedVerifications.current += 1;
+        setVerificationStatus("error");
         toast({
-          title: "Verification Failed",
-          description: "Face doesn't match our records. Please try again.",
+          title: "Face did not match",
+          description: "Look at the camera in good lighting and try again.",
           variant: "destructive",
         });
-        
-        // Increment the consecutive failures counter
-        consecutiveFailedVerifications.current += 1;
-        
-        // Check if we need to lock the account
-        if (consecutiveFailedVerifications.current >= 3) {
-          const lockoutEnd = new Date();
-          lockoutEnd.setMinutes(lockoutEnd.getMinutes() + 15);
-          setIsLocked(true);
-          setLockoutEndTime(lockoutEnd);
-          
-          toast({
-            title: "Account Temporarily Locked",
-            description: "Too many failed verification attempts. For security reasons, biometric verification has been locked for 15 minutes.",
-            variant: "destructive",
-          });
-        }
-        
-        // Reset to try again
+        if (consecutiveFailedVerifications.current >= 5) lockTemporarily();
         setTimeout(() => {
           setIsCaptured(false);
           setIsVerifying(false);
-          setVerificationStatus('idle');
-        }, 2000);
-        
+          setVerificationStatus("idle");
+        }, 1600);
         if (onError) onError();
       }
     } catch (error) {
-      console.error('Face verification error:', error);
-      setVerificationStatus('error');
-      toast({
-        title: "Verification Error",
-        description: "An error occurred during face verification. Please try again.",
-        variant: "destructive",
-      });
-      
-      // Reset to try again
-      setTimeout(() => {
-        setIsCaptured(false);
-        setIsVerifying(false);
-        setVerificationStatus('idle');
-      }, 2000);
-      
+      console.error(error);
+      setVerificationStatus("error");
       if (onError) onError();
+    } finally {
+      setIsVerifying(false);
     }
   };
 
-  // Reset verification process
-  const resetVerification = () => {
-    setIsCaptured(false);
-    setIsVerifying(false);
-    setVerificationStatus('idle');
-    setIsLivenessChecking(false);
-    setLivenessGestures([]);
-    setCurrentGesture(null);
-    captureAttempts.current = 0;
-    livenessPassedRef.current = false;
-  };
-  
-  // Enhanced face comparison with more sophisticated security checks
-  const simulateFaceComparison = async (referenceImage: string): Promise<{verified: boolean, confidence: number}> => {
-    return new Promise((resolve) => {
-      // Simulate API delay - longer for more thorough checking
-      setTimeout(() => {
-        // Enhanced simulation with multiple security factors
-        // 1. Random element to simulate real comparison
-        const randomFactor = Math.random();
-        
-        // 2. Current consecutive failures affect verification difficulty
-        const difficultyFactor = 0.9 - (consecutiveFailedVerifications.current * 0.1);
-        
-        // 3. Check if liveness check was actually passed
-        const livenessCheckPassed = livenessPassedRef.current;
-        
-        // 4. Require ALL security checks to pass for successful verification
-        const isSuccess = livenessCheckPassed && (randomFactor < difficultyFactor);
-        
-        resolve({ 
-          verified: isSuccess,
-          confidence: isSuccess ? 0.85 + Math.random() * 0.1 : 0.3 + Math.random() * 0.2
-        });
-      }, 2500); // Longer verification time for more thorough checking
+  const startLiveness = () => {
+    livenessQueue.current = pickLivenessGestures();
+    livenessTracker.current.reset();
+    setCurrentGesture(livenessQueue.current[0]);
+    setIsLivenessChecking(true);
+    toast({
+      title: "Liveness check",
+      description: `Please ${gestureInstruction(livenessQueue.current[0])}.`,
     });
   };
-  
-  // Enhanced palm verification
-  const verifyPalm = async (palmImageData: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      // Simulate API delay - longer for more thorough checking
-      setTimeout(() => {
-        // Enhanced verification logic
-        const randomFactor = Math.random();
-        const difficultyFactor = 0.95 - (consecutiveFailedVerifications.current * 0.05);
-        resolve(randomFactor < difficultyFactor);
-      }, 2000);
-    });
+
+  const processLiveFrame = useCallback(
+    async (frame: FaceDetectionFrame, video: HTMLVideoElement, canvas: HTMLCanvasElement) => {
+      if (!isLivenessChecking || !currentGesture || isLocked || livenessBusy.current) return;
+      const passed = livenessTracker.current.update(frame, currentGesture);
+      if (!passed) return;
+
+      livenessBusy.current = true;
+      try {
+        const idx = livenessQueue.current.indexOf(currentGesture);
+        if (idx < livenessQueue.current.length - 1) {
+          const next = livenessQueue.current[idx + 1];
+          livenessTracker.current.reset();
+          setCurrentGesture(next);
+          toast({ title: "Good", description: `Now ${gestureInstruction(next)}.` });
+          return;
+        }
+
+        setIsLivenessChecking(false);
+        setCurrentGesture(null);
+
+        if (isRegistrationMode) {
+          await registerFromVideo(video, canvas);
+        } else {
+          await verifyAgainstReference(video);
+        }
+      } finally {
+        livenessBusy.current = false;
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isLivenessChecking, currentGesture, isLocked, isRegistrationMode]
+  );
+
+  const captureImage = (
+    videoRef: React.RefObject<HTMLVideoElement>,
+    canvasRef: React.RefObject<HTMLCanvasElement>
+  ) => {
+    if (!videoRef.current || !canvasRef.current) {
+      toast({
+        title: "Camera not ready",
+        description: "Please wait for the camera, then try again.",
+        variant: "destructive",
+      });
+      if (onError) onError();
+      return;
+    }
+
+    if (isLocked) {
+      toast({
+        title: "Temporarily locked",
+        description: "Wait a few minutes before trying again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const frame = liveFrame;
+    if (!frame?.detected) {
+      toast({
+        title: "No face detected",
+        description: "Look at the camera with your face clearly visible.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!frame.closeEnough || !frame.centered) {
+      toast({
+        title: "Adjust your position",
+        description: "Center your face and move a bit closer.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!isRegistrationMode && !hasReferenceImage && !referenceDescriptor.current) {
+      toast({
+        title: "Face not registered",
+        description: "Register your face first, then verify.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    startLiveness();
   };
-  
-  // Retry face verification
+
   const retryCapture = () => {
     setIsCaptured(false);
-    setVerificationStatus('idle');
-    resetVerification();
+    setIsVerifying(false);
+    setIsRegistering(false);
+    setVerificationStatus("idle");
+    setIsLivenessChecking(false);
+    setCurrentGesture(null);
+    livenessTracker.current.reset();
   };
 
   return {
@@ -530,14 +396,15 @@ export function useFaceVerification({ onVerified, onError, isRegistrationMode = 
     retryCapture,
     hasReferenceImage,
     isRegistering,
-    registerFace,
     isRegistrationMode,
     isLivenessChecking,
     currentGesture,
-    processLivenessGesture,
-    verifyPalm,
     isLocked,
     lockoutEndTime,
-    failedAttempts
+    modelReady,
+    modelError,
+    liveFrame,
+    detectFromVideo,
+    processLiveFrame,
   };
 }

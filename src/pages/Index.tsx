@@ -30,14 +30,17 @@ const Home = () => {
               A transparent, secure, and tamper-proof electoral system using cutting-edge technology
             </p>
             <div className="flex flex-col sm:flex-row justify-center gap-4">
-              <Button size="lg" onClick={() => navigate('/registration')}>
-                Register to Vote
+              <Button size="lg" onClick={() => navigate('/')}>
+                Enter election code
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
-              <Button size="lg" variant="outline" onClick={() => navigate('/vote')}>
-                Access Voting System
+              <Button size="lg" variant="outline" onClick={() => navigate('/results')}>
+                View results
               </Button>
             </div>
+            <p className="text-sm text-muted-foreground mt-4">
+              Voters do not register or log in. Admins create an election code and share it.
+            </p>
           </div>
           
           <div className="grid gap-6 md:grid-cols-3 mb-12">

@@ -5,7 +5,18 @@ import type { Database } from './types';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-// Import the supabase client like this:
-// import { supabase } from "@/integrations/supabase/client";
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error(
+    '[Supabase] Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY in .env — auth will fail.'
+  );
+}
 
-export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey);
+// Prefer the legacy "anon" "public" JWT key (starts with eyJ...) from
+ // Project Settings → API. sb_publishable_ keys also work on newer projects.
+export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+});
