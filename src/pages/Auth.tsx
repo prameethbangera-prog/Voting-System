@@ -1,17 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, Mail, Lock, User, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Label } from '@/components/ui/label';
 import { useAuth } from '@/hooks/useAuth';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
-import { toast } from '@/hooks/use-toast';
 
 const loginSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
@@ -31,15 +29,13 @@ type SignupFormValues = z.infer<typeof signupSchema>;
 
 const AuthPage = () => {
   const [activeTab, setActiveTab] = useState<string>('login');
-  const { signIn, signUp, isLoading, user } = useAuth();
+  const { signIn, signUp, signOut, isLoading, user } = useAuth();
   const navigate = useNavigate();
 
-  // Redirect if already logged in - to the home page
-  useEffect(() => {
-    if (user) {
-      navigate('/home');
-    }
-  }, [user, navigate]);
+  // Only go to admin after a successful login/signup on this page — not when already logged in
+  const goToAdminAfterAuth = () => {
+    navigate('/admin');
+  };
 
   const loginForm = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -62,9 +58,8 @@ const AuthPage = () => {
   const onLoginSubmit = async (data: LoginFormValues) => {
     try {
       await signIn(data.email, data.password);
-      // Redirect handled by useEffect
+      goToAdminAfterAuth();
     } catch (error) {
-      // Error is already handled by the auth hook
       console.error('Login failed:', error);
     }
   };
@@ -72,18 +67,38 @@ const AuthPage = () => {
   const onSignupSubmit = async (data: SignupFormValues) => {
     try {
       await signUp(data.email, data.password, data.fullName);
-      // Sign up success, show message and switch to login
-      setActiveTab('login');
-      toast({
-        title: "Check your email",
-        description: "We've sent you a confirmation email. Please verify your account.",
-      });
       signupForm.reset();
+      goToAdminAfterAuth();
     } catch (error) {
-      // Error is already handled by the auth hook
       console.error('Signup failed:', error);
     }
   };
+
+  if (user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <Card className="max-w-md w-full">
+          <CardHeader>
+            <CardTitle>Already signed in</CardTitle>
+            <CardDescription>
+              You are signed in as {user.email}. Open the admin dashboard, or sign out to use a different account.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <Button onClick={() => navigate('/admin')}>Go to admin dashboard</Button>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                await signOut();
+              }}
+            >
+              Sign out
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
@@ -93,8 +108,10 @@ const AuthPage = () => {
             <Shield size={28} />
           </div>
         </div>
-        <h1 className="text-2xl font-bold text-center mb-2">SecureVote Chain</h1>
-        <p className="text-center text-gray-500 mb-8">Secure and transparent voting system</p>
+        <h1 className="text-2xl font-bold text-center mb-2">Admin sign in</h1>
+        <p className="text-center text-gray-500 mb-8">
+          Sign in to manage elections and share access codes.
+        </p>
         
         <Tabs defaultValue="login" value={activeTab} onValueChange={setActiveTab}>
           <TabsList className="grid grid-cols-2 mb-6 w-full">
