@@ -71,6 +71,23 @@ export async function joinElectionWithCode(code: string): Promise<JoinElectionRe
   return result;
 }
 
+/** Join as logged-in eligible voter (code + email must match account). */
+export async function joinElectionWithCodeAndEmail(
+  code: string,
+  email: string
+): Promise<JoinElectionResult> {
+  const { data, error } = await supabase.rpc("join_election_with_code_and_email", {
+    p_code: code.trim().toUpperCase(),
+    p_email: email.trim().toLowerCase(),
+  });
+
+  if (error) throw new Error(rpcErrorMessage(error));
+  const result = data as JoinElectionResult;
+  if (!result?.session_token) throw new Error("Failed to start voting session");
+  saveVoterSessionToken(result.session_token);
+  return result;
+}
+
 export async function completeSessionBiometrics(opts: {
   faceVerified?: boolean;
   palmVerified?: boolean;

@@ -187,7 +187,7 @@ const Home = () => {
             </div>
             
             <div className="text-center">
-              <Button size="lg" onClick={() => navigate('/registration')}>
+              <Button size="lg" onClick={() => navigate('/register')}>
                 Get Started
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>

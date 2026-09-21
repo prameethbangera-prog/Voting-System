@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Shield, KeyRound, BarChart, Settings, LogOut, Info } from 'lucide-react';
+import { Shield, KeyRound, BarChart, Settings, LogOut, Info, UserPlus, LogIn } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -14,12 +14,15 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   const navItems = [
     { name: 'Join', path: '/', icon: KeyRound },
+    { name: 'Register', path: '/register', icon: UserPlus },
     { name: 'Results', path: '/results', icon: BarChart },
     { name: 'About', path: '/home', icon: Info },
   ];
 
   if (user) {
     navItems.push({ name: 'Admin', path: '/admin', icon: Settings });
+  } else {
+    navItems.push({ name: 'Login', path: '/login', icon: LogIn });
   }
 
   const handleSignOut = async () => {
@@ -67,12 +70,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
       <footer className="border-t bg-white py-6">
         <div className="container mx-auto px-4 text-center text-sm text-gray-500">
-          <p>© {new Date().getFullYear()} SecureVote Chain — join with election access code</p>
+          <p>© {new Date().getFullYear()} SecureVote Chain — register, join with code, verify biometrics</p>
         </div>
       </footer>
 
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">
-        <div className={cn("grid", navItems.length >= 4 ? "grid-cols-4" : "grid-cols-3")}>
+        <div className={cn("grid", navItems.length >= 5 ? "grid-cols-5" : "grid-cols-4")}>
           {navItems.map((item) => (
             <Link
               key={item.name + item.path}
