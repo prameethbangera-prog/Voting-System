@@ -100,6 +100,35 @@ export type Database = {
           }
         ]
       }
+      election_eligible_voters: {
+        Row: {
+          id: string
+          election_id: string
+          email: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          election_id: string
+          email: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          election_id?: string
+          email?: string
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "election_eligible_voters_election_id_fkey"
+            columns: ["election_id"]
+            isOneToOne: false
+            referencedRelation: "elections"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       otp_requests: {
         Row: {
           attempts: number
@@ -183,24 +212,36 @@ export type Database = {
         Row: {
           created_at: string
           face_verified: boolean
-          id: string
+          face_image_url: string | null
+          face_descriptor: Json | null
           palm_verified: boolean
+          palm_image_url: string | null
+          palm_descriptor: Json | null
+          id: string
           updated_at: string
           user_id: string
         }
         Insert: {
           created_at?: string
           face_verified?: boolean
-          id?: string
+          face_image_url?: string | null
+          face_descriptor?: Json | null
           palm_verified?: boolean
+          palm_image_url?: string | null
+          palm_descriptor?: Json | null
+          id?: string
           updated_at?: string
           user_id: string
         }
         Update: {
           created_at?: string
           face_verified?: boolean
-          id?: string
+          face_image_url?: string | null
+          face_descriptor?: Json | null
           palm_verified?: boolean
+          palm_image_url?: string | null
+          palm_descriptor?: Json | null
+          id?: string
           updated_at?: string
           user_id?: string
         }
@@ -296,6 +337,22 @@ export type Database = {
     Functions: {
       join_election_with_code: {
         Args: { p_code: string }
+        Returns: Json
+      }
+      join_election_with_code_and_email: {
+        Args: { p_code: string; p_email: string }
+        Returns: Json
+      }
+      list_election_eligible_voters: {
+        Args: { p_election_id: string }
+        Returns: Json
+      }
+      add_election_eligible_voter: {
+        Args: { p_election_id: string; p_email: string }
+        Returns: Json
+      }
+      remove_election_eligible_voter: {
+        Args: { p_election_id: string; p_email: string }
         Returns: Json
       }
       complete_session_biometrics: {

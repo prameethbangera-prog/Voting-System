@@ -97,11 +97,21 @@ export function useFaceVerification({
       try {
         const { data, error } = await supabase
           .from("user_biometrics")
-          .select("face_image_url")
+          .select("face_image_url, face_descriptor")
           .eq("user_id", user.id)
           .maybeSingle();
 
-        if (error || !data?.face_image_url) return;
+        if (error || !data) return;
+
+        if (Array.isArray(data.face_descriptor) && data.face_descriptor.length) {
+          const desc = data.face_descriptor.map(Number);
+          referenceDescriptor.current = desc;
+          saveLocalDescriptor(desc);
+          setHasReferenceImage(true);
+          return;
+        }
+
+        if (!data.face_image_url) return;
 
         const frame = await detectFaceOnDataUrl(data.face_image_url);
         if (frame.descriptor.length) {
@@ -220,18 +230,26 @@ export function useFaceVerification({
           .eq("user_id", user.id)
           .maybeSingle();
 
+        const payload = {
+          face_image_url: imageData,
+          face_descriptor: frame.descriptor,
+          face_verified: true,
+          updated_at: new Date().toISOString(),
+        };
+
         const result = existingData
           ? await supabase
               .from("user_biometrics")
-              .update({ face_image_url: imageData, updated_at: new Date().toISOString() })
+              .update(payload)
               .eq("user_id", user.id)
           : await supabase.from("user_biometrics").insert({
               user_id: user.id,
-              face_image_url: imageData,
+              ...payload,
             });
 
         if (result.error) {
           console.warn("Could not save face to database:", result.error);
+          throw new Error(result.error.message);
         }
       }
 

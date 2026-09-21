@@ -3,7 +3,7 @@ import Layout from '@/components/Layout';
 import AdminDashboard from '@/components/admin/AdminDashboard';
 import { useAuth } from '@/hooks/useAuth';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Loader2, Users, Vote, Copy, Megaphone, Calendar, UserPlus } from 'lucide-react';
+import { Loader2, Users, Vote, Copy, Megaphone, Calendar, UserPlus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
@@ -14,6 +14,13 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import {
+  addEligibleVoter,
+  listEligibleVoters,
+  parseEmailList,
+  removeEligibleVoter,
+  type EligibleVoter,
+} from '@/utils/eligibleVoters';
 
 interface Election {
   id: string;
@@ -62,6 +69,12 @@ const Admin = () => {
   const [candidateParty, setCandidateParty] = useState<string>("");
   const [candidateBio, setCandidateBio] = useState<string>("");
 
+  const [eligibleVoters, setEligibleVoters] = useState<EligibleVoter[]>([]);
+  const [eligibleEmailInput, setEligibleEmailInput] = useState("");
+  const [eligibleBulkInput, setEligibleBulkInput] = useState("");
+  const [isLoadingEligible, setIsLoadingEligible] = useState(false);
+  const [isSavingEligible, setIsSavingEligible] = useState(false);
+
   // Fetch elections after auth login (ProtectedRoute already requires a session)
   useEffect(() => {
     if (user) {
@@ -89,8 +102,97 @@ const Admin = () => {
   useEffect(() => {
     if (selectedElection) {
       fetchCandidates(selectedElection.id);
+      fetchEligibleVoters(selectedElection.id);
+    } else {
+      setEligibleVoters([]);
     }
   }, [selectedElection]);
+
+  const fetchEligibleVoters = async (electionId: string) => {
+    setIsLoadingEligible(true);
+    try {
+      const list = await listEligibleVoters(electionId);
+      setEligibleVoters(list);
+    } catch (error) {
+      console.error("Error fetching eligible voters:", error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to load eligible voters.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoadingEligible(false);
+    }
+  };
+
+  const handleAddEligibleEmail = async () => {
+    if (!selectedElection) return;
+    const email = eligibleEmailInput.trim().toLowerCase();
+    if (!email.includes("@")) {
+      toast({ title: "Invalid email", description: "Enter a valid email address.", variant: "destructive" });
+      return;
+    }
+    setIsSavingEligible(true);
+    try {
+      await addEligibleVoter(selectedElection.id, email);
+      setEligibleEmailInput("");
+      await fetchEligibleVoters(selectedElection.id);
+      toast({ title: "Added", description: `${email} can vote in this election.` });
+    } catch (error) {
+      toast({
+        title: "Could not add",
+        description: error instanceof Error ? error.message : "Try again",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSavingEligible(false);
+    }
+  };
+
+  const handleBulkAddEligible = async () => {
+    if (!selectedElection) return;
+    const emails = parseEmailList(eligibleBulkInput);
+    if (!emails.length) {
+      toast({ title: "No emails found", description: "Paste emails separated by commas or new lines.", variant: "destructive" });
+      return;
+    }
+    setIsSavingEligible(true);
+    let ok = 0;
+    let fail = 0;
+    try {
+      for (const email of emails) {
+        try {
+          await addEligibleVoter(selectedElection.id, email);
+          ok += 1;
+        } catch {
+          fail += 1;
+        }
+      }
+      setEligibleBulkInput("");
+      await fetchEligibleVoters(selectedElection.id);
+      toast({
+        title: "Eligible list updated",
+        description: `Added ${ok}${fail ? `, ${fail} failed` : ""}.`,
+      });
+    } finally {
+      setIsSavingEligible(false);
+    }
+  };
+
+  const handleRemoveEligible = async (email: string) => {
+    if (!selectedElection) return;
+    try {
+      await removeEligibleVoter(selectedElection.id, email);
+      await fetchEligibleVoters(selectedElection.id);
+      toast({ title: "Removed", description: email });
+    } catch (error) {
+      toast({
+        title: "Could not remove",
+        description: error instanceof Error ? error.message : "Try again",
+        variant: "destructive",
+      });
+    }
+  };
 
   const fetchElections = async () => {
     setIsLoadingElections(true);
@@ -264,8 +366,8 @@ const Admin = () => {
       toast({
         title: "Election created",
         description: code
-          ? `Share access code ${code} with voters. They join at the home page — no login.`
-          : "Election created. Share the access code shown on the Candidates tab.",
+          ? `Share access code ${code}. Add eligible emails on the Eligible Voters tab.`
+          : "Election created. Add eligible emails and share the access code.",
       });
       
       // Reset form fields
@@ -484,10 +586,11 @@ const Admin = () => {
             </div>
             
             <Tabs value={activeTab} onValueChange={setActiveTab}>
-              <TabsList className="grid grid-cols-3">
+              <TabsList className="grid grid-cols-4">
                 <TabsTrigger value="create">Create Election</TabsTrigger>
                 <TabsTrigger value="edit">Edit Election</TabsTrigger>
                 <TabsTrigger value="candidates">Manage Candidates</TabsTrigger>
+                <TabsTrigger value="eligible">Eligible Voters</TabsTrigger>
               </TabsList>
               
               <TabsContent value="create">
@@ -663,7 +766,7 @@ const Admin = () => {
                             <div>
                               <p className="text-sm font-medium">Voter access code</p>
                               <p className="text-xs text-muted-foreground mt-1">
-                                Share this code on the join page. Voters do not log in.
+                                Share with registered voters listed under Eligible Voters.
                               </p>
                               {selectedElection.access_code ? (
                                 <p className="font-mono text-2xl tracking-[0.25em] mt-2 font-semibold">
@@ -885,7 +988,7 @@ const Admin = () => {
                         <div>
                           <p className="text-sm font-medium">Voter access code</p>
                           <p className="text-xs text-muted-foreground mt-1">
-                            Share this code. Voters join on the home page — no login or registration.
+                            Share this code with eligible voters. They must be registered and listed under Eligible Voters.
                           </p>
                           {selectedElection.access_code ? (
                             <p className="font-mono text-2xl tracking-[0.25em] mt-2 font-semibold">
@@ -1038,6 +1141,114 @@ const Admin = () => {
                           )}
                         </div>
                       </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              <TabsContent value="eligible">
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <UserPlus className="h-6 w-6 text-primary" />
+                      <CardTitle>Eligible Voters</CardTitle>
+                    </div>
+                    <CardDescription>
+                      Only these emails can join this election (after registering face and palm).
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div>
+                      <Label>Select Election</Label>
+                      <Select
+                        value={selectedElection?.id ?? undefined}
+                        onValueChange={handleElectionSelect}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select an election" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {elections.map((election) => (
+                            <SelectItem key={election.id} value={election.id}>
+                              {election.title}
+                              {election.access_code ? ` (${election.access_code})` : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {selectedElection && (
+                      <>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <Input
+                            type="email"
+                            placeholder="voter@example.com"
+                            value={eligibleEmailInput}
+                            onChange={(e) => setEligibleEmailInput(e.target.value)}
+                            disabled={isSavingEligible}
+                          />
+                          <Button
+                            type="button"
+                            onClick={handleAddEligibleEmail}
+                            disabled={isSavingEligible}
+                          >
+                            {isSavingEligible ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add email"}
+                          </Button>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="bulk-emails">Bulk add (one per line or comma-separated)</Label>
+                          <Textarea
+                            id="bulk-emails"
+                            placeholder={"alice@example.com\nbob@example.com"}
+                            value={eligibleBulkInput}
+                            onChange={(e) => setEligibleBulkInput(e.target.value)}
+                            rows={4}
+                            disabled={isSavingEligible}
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={handleBulkAddEligible}
+                            disabled={isSavingEligible}
+                          >
+                            Add all
+                          </Button>
+                        </div>
+
+                        <div>
+                          <h3 className="text-sm font-medium mb-2">
+                            Eligible list ({eligibleVoters.length})
+                          </h3>
+                          {isLoadingEligible ? (
+                            <Loader2 className="h-5 w-5 animate-spin" />
+                          ) : eligibleVoters.length === 0 ? (
+                            <p className="text-sm text-muted-foreground">
+                              No eligible emails yet. Add voters who have registered accounts.
+                            </p>
+                          ) : (
+                            <ul className="divide-y rounded-md border">
+                              {eligibleVoters.map((v) => (
+                                <li
+                                  key={v.id}
+                                  className="flex items-center justify-between px-3 py-2 text-sm"
+                                >
+                                  <span>{v.email}</span>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleRemoveEligible(v.email)}
+                                  >
+                                    <Trash2 className="h-4 w-4 text-destructive" />
+                                  </Button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </>
                     )}
                   </CardContent>
                 </Card>

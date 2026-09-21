@@ -4,20 +4,51 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import {
   detectHandOnVideo,
   getHandLandmarker,
   HAND_CONNECTIONS,
   type HandFrame,
 } from "@/utils/face/mediapipeHand";
+import {
+  PALM_MATCH_THRESHOLD,
+  palmLandmarkDescriptor,
+  palmMatchScore,
+} from "@/utils/face/palmDescriptor";
 
 interface PalmRecognitionProps {
   onVerified: () => void;
   onError?: () => void;
   className?: string;
+  isRegistrationMode?: boolean;
 }
 
-const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProps) => {
+const PALM_DESCRIPTOR_KEY = "securevote_palm_descriptor";
+
+function loadLocalPalm(): number[] | null {
+  try {
+    const raw = sessionStorage.getItem(PALM_DESCRIPTOR_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalPalm(descriptor: number[]) {
+  sessionStorage.setItem(PALM_DESCRIPTOR_KEY, JSON.stringify(descriptor));
+}
+
+const PalmRecognition = ({
+  onVerified,
+  onError,
+  className,
+  isRegistrationMode = false,
+}: PalmRecognitionProps) => {
+  const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -26,6 +57,8 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
   const lastTsRef = useRef(0);
   const stableCountRef = useRef(0);
   const lastReadyRef = useRef(false);
+  const latestFrameRef = useRef<HandFrame | null>(null);
+  const referenceRef = useRef<number[] | null>(loadLocalPalm());
 
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [modelReady, setModelReady] = useState(false);
@@ -35,6 +68,7 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
   const [isCapturing, setIsCapturing] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasReference, setHasReference] = useState(Boolean(referenceRef.current?.length));
 
   useEffect(() => {
     let cancelled = false;
@@ -50,6 +84,33 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (isRegistrationMode || !user?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from("user_biometrics")
+          .select("palm_descriptor, palm_image_url")
+          .eq("user_id", user.id)
+          .maybeSingle();
+        if (cancelled) return;
+        const desc = data?.palm_descriptor;
+        if (Array.isArray(desc) && desc.length) {
+          const nums = desc.map(Number);
+          referenceRef.current = nums;
+          saveLocalPalm(nums);
+          setHasReference(true);
+        }
+      } catch (err) {
+        console.error("Failed to load palm reference:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, isRegistrationMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,8 +135,7 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
         }
       } catch (err) {
         console.error(err);
-        setError("Could not access camera. Allow camera permission and refresh.");
-        onError?.();
+        setError("Camera access denied. Allow camera permissions and refresh.");
       }
     };
     start();
@@ -84,21 +144,21 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
-  }, [onError]);
+  }, []);
 
   useEffect(() => {
     if (!isCameraReady || !modelReady || done) return;
 
-    const loop = async () => {
+    const loop = async (now: number) => {
       const video = videoRef.current;
       const overlay = overlayRef.current;
-      if (video && overlay && !detectingRef.current) {
-        const now = performance.now();
-        if (now - lastTsRef.current >= 80) {
-          lastTsRef.current = now;
+      if (video && overlay && video.readyState >= 2) {
+        if (!detectingRef.current && now - lastTsRef.current > 66) {
           detectingRef.current = true;
+          lastTsRef.current = now;
           try {
             const frame = await detectHandOnVideo(video, now);
+            latestFrameRef.current = frame;
             drawHandOverlay(overlay, video, frame);
 
             const ready = Boolean(frame.detected && frame.openPalm && frame.closeEnough);
@@ -117,7 +177,7 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
             else if (!frame.openPalm) setHint("Open your hand — fingers spread, palm facing the camera.");
             else if (!frame.closeEnough) setHint("Move your palm a bit closer.");
             else if (!stable) setHint("Hold still…");
-            else setHint("Palm ready. Click Scan palm.");
+            else setHint(isRegistrationMode ? "Palm ready. Click Register palm." : "Palm ready. Click Scan palm.");
           } catch (err) {
             console.error(err);
           } finally {
@@ -132,9 +192,46 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [isCameraReady, modelReady, done]);
+  }, [isCameraReady, modelReady, done, isRegistrationMode]);
 
-  const handleScan = () => {
+  const capturePalmImage = (): string | null => {
+    const video = videoRef.current;
+    if (!video) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  };
+
+  const savePalmToDb = async (imageData: string, descriptor: number[]) => {
+    if (!user?.id) return;
+    const { data: existing } = await supabase
+      .from("user_biometrics")
+      .select("id")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    const payload = {
+      palm_image_url: imageData,
+      palm_descriptor: descriptor,
+      palm_verified: true,
+      updated_at: new Date().toISOString(),
+    };
+
+    const result = existing
+      ? await supabase.from("user_biometrics").update(payload).eq("user_id", user.id)
+      : await supabase.from("user_biometrics").insert({ user_id: user.id, ...payload });
+
+    if (result.error) {
+      console.warn("Could not save palm to database:", result.error);
+      throw new Error(result.error.message);
+    }
+  };
+
+  const handleScan = async () => {
     if (!palmReady) {
       toast({
         title: "Palm not ready",
@@ -143,13 +240,80 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
       });
       return;
     }
+
+    const frame = latestFrameRef.current;
+    if (!frame?.detected || !frame.landmarks.length) {
+      toast({
+        title: "No palm detected",
+        description: "Show your open palm clearly and try again.",
+        variant: "destructive",
+      });
+      onError?.();
+      return;
+    }
+
     setIsCapturing(true);
-    setTimeout(() => {
+    try {
+      const descriptor = palmLandmarkDescriptor(frame.landmarks);
+      if (!descriptor.length) throw new Error("Could not build palm fingerprint.");
+
+      if (isRegistrationMode) {
+        const imageData = capturePalmImage();
+        if (!imageData) throw new Error("Could not capture palm image.");
+        referenceRef.current = descriptor;
+        saveLocalPalm(descriptor);
+        setHasReference(true);
+        await savePalmToDb(imageData, descriptor);
+        setDone(true);
+        toast({ title: "Palm registered", description: "Your palm biometric is saved." });
+        onVerified();
+        return;
+      }
+
+      let reference = referenceRef.current ?? loadLocalPalm();
+      if (!reference?.length && user?.id) {
+        const { data } = await supabase
+          .from("user_biometrics")
+          .select("palm_descriptor")
+          .eq("user_id", user.id)
+          .maybeSingle();
+        if (Array.isArray(data?.palm_descriptor)) {
+          reference = data.palm_descriptor.map(Number);
+          referenceRef.current = reference;
+        }
+      }
+
+      if (!reference?.length) {
+        throw new Error("No registered palm found. Complete registration first.");
+      }
+
+      const score = palmMatchScore(descriptor, reference);
+      if (score < PALM_MATCH_THRESHOLD) {
+        toast({
+          title: "Palm did not match",
+          description: `Match score ${Math.round(score * 100)}%. Try again with the same hand.`,
+          variant: "destructive",
+        });
+        onError?.();
+        return;
+      }
+
       setDone(true);
-      setIsCapturing(false);
-      toast({ title: "Palm verified", description: "You can continue to vote." });
+      toast({
+        title: "Palm verified",
+        description: `Match score ${Math.round(score * 100)}%.`,
+      });
       onVerified();
-    }, 500);
+    } catch (err) {
+      toast({
+        title: isRegistrationMode ? "Palm registration failed" : "Palm verification failed",
+        description: err instanceof Error ? err.message : "Try again.",
+        variant: "destructive",
+      });
+      onError?.();
+    } finally {
+      setIsCapturing(false);
+    }
   };
 
   const loading = !isCameraReady || !modelReady;
@@ -157,8 +321,13 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
   return (
     <div className={cn("flex flex-col items-center gap-4 p-4", className)}>
       <div className="text-center">
-        <h3 className="font-semibold text-lg">Palm verification</h3>
+        <h3 className="font-semibold text-lg">
+          {isRegistrationMode ? "Palm registration" : "Palm verification"}
+        </h3>
         <p className="text-sm text-muted-foreground">Hold an open palm facing the camera</p>
+        {!isRegistrationMode && !hasReference && user && (
+          <p className="text-xs text-amber-700 mt-1">Loading your registered palm…</p>
+        )}
       </div>
 
       <div className="relative w-full max-w-md aspect-video bg-black rounded-lg overflow-hidden">
@@ -207,12 +376,12 @@ const PalmRecognition = ({ onVerified, onError, className }: PalmRecognitionProp
           {isCapturing ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              Scanning…
+              {isRegistrationMode ? "Saving…" : "Scanning…"}
             </>
           ) : (
             <>
               <Hand className="w-4 h-4" />
-              Scan palm
+              {isRegistrationMode ? "Register palm" : "Scan palm"}
             </>
           )}
         </Button>

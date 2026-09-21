@@ -12,6 +12,8 @@ import Results from "./pages/Results";
 import Admin from "./pages/Admin";
 import NotFound from "./pages/NotFound";
 import Auth from "./pages/Auth";
+import VoterRegister from "./pages/VoterRegister";
+import VoterLogin from "./pages/VoterLogin";
 
 const queryClient = new QueryClient();
 
@@ -23,14 +25,14 @@ const App = () => (
         <Sonner />
         <BrowserRouter>
           <Routes>
-            {/* Voters: join with access code (no login) */}
             <Route path="/" element={<JoinElection />} />
             <Route path="/join" element={<Navigate to="/" replace />} />
+            <Route path="/register" element={<VoterRegister />} />
+            <Route path="/login" element={<VoterLogin />} />
             <Route path="/session-vote" element={<SessionVote />} />
             <Route path="/results" element={<Results />} />
             <Route path="/home" element={<Index />} />
 
-            {/* Admin only */}
             <Route path="/auth" element={<Auth />} />
             <Route
               path="/admin"
@@ -41,10 +43,9 @@ const App = () => (
               }
             />
 
-            {/* Legacy voter login/register routes removed from primary flow */}
             <Route path="/vote" element={<Navigate to="/" replace />} />
-            <Route path="/registration" element={<Navigate to="/" replace />} />
-            <Route path="/profile" element={<Navigate to="/" replace />} />
+            <Route path="/registration" element={<Navigate to="/register" replace />} />
+            <Route path="/profile" element={<Navigate to="/register" replace />} />
 
             <Route path="*" element={<NotFound />} />
           </Routes>

@@ -171,12 +171,11 @@ const SessionVote = () => {
             <CardHeader>
               <CardTitle>Face verification</CardTitle>
               <CardDescription>
-                Register and verify your face for this election. No account login is used.
+                Match your face to the biometrics you registered for this account.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <FaceRecognition
-                isRegistrationMode
                 onVerified={handleFaceOk}
                 onError={() =>
                   toast({
@@ -194,7 +193,9 @@ const SessionVote = () => {
           <Card>
             <CardHeader>
               <CardTitle>Palm verification</CardTitle>
-              <CardDescription>Complete palm verification to unlock the ballot.</CardDescription>
+              <CardDescription>
+                Match your palm to the hand you registered. Same hand, open palm.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <PalmRecognition
